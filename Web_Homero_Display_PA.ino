@@ -75,6 +75,11 @@ unsigned long last_lcd_time_update_millis;
 int init_bme280 = 255; // 255 sikertelen, 0 sikeres
 int ledstatus = 0;
 
+int lcd_vilagit = 0;
+// 0 egyszerű modon írjuk ki
+// 1 bonyulultan irjuk ki
+int lcd_displaymode = 0;
+
 struct sensordata
 {
   String hostname;
@@ -706,7 +711,7 @@ void handleset() {
       s2 = (String)server.arg(i);
       sensorid = s2.toInt();
       myeprom.sensorid = sensorid;
-      msg2 += "\nvillogas updated: ";
+      msg2 += "\nsensorid updated: ";
       msg2 += sensorid;
     }
 
@@ -783,6 +788,7 @@ void handlebacklight()
 {
   last_backlight_on_millis = millis();
   lcd.backlight();
+  lcd_vilagit=1;
   handleRoot();
 }
 void onStationDisconnected(const WiFiEventSoftAPModeStationDisconnected& evt) {
@@ -1087,6 +1093,32 @@ String minmax_last24h()
 
 void lcd_display_info()
 {
+  if( lcd_displaymode == 0) lcd_display_info_simple();
+  else lcd_display_info_full();
+}
+
+void lcd_display_info_simple()
+{
+  last_lcdupdate_milis=millis();
+  lcd.home();
+  lcd.clear();
+  
+  lcd.setCursor(0, 0);
+  lcd.print(" T(itt) :");
+  lcd.print(sensor[0].t);
+
+  lcd.setCursor(0, 1);
+  lcd.print(" T(kint):");
+  lcd.print(sensor[1].t);
+
+  lcd.setCursor(0, 2);
+  lcd.print(" T(fent):");
+  lcd.print(sensor[2].t);
+}
+
+
+void lcd_display_info_full()
+{
   int i;
   long lastreadmillisago;
   //Serial.print("\nlcd update");
@@ -1187,6 +1219,7 @@ void setup(void) {
 
   lcd.begin(20, 4, LCD_5x8DOTS);       // initialize the lcd for 20 chars 4 lines, turn on backlight
   lcd.backlight();
+  lcd_vilagit=1;
   lcd.clear();
   lcd.home();
   lcd.setCursor(0, 0); //Start at character 4 on line 0
@@ -1248,7 +1281,7 @@ void setup(void) {
  // NTP Client
   timeClient.begin();
   
-  delay(2000);
+ 
 
   sensor[0].hostname = "localhost";
   sensor[0].status = SENSOR_IDLE;
@@ -1266,7 +1299,7 @@ void setup(void) {
     request_remote_sensor_data();
   }
 
-
+  delay(2000);
 }
 
 void request_remote_sensor_data()
@@ -1543,12 +1576,16 @@ void loop(void) {
      {
       update_local_sensor_data();
       lcd_display_info();
+      // ha ez nincs itt akár 1mp-t is kell varni a kov ido frissítésre
+      lcd_display_time();
      }
 
-    // 2 perc utan kikapcsoljuk a villanyt
-    if( currentmilis - last_backlight_on_millis > 120000)
+    // 1 perc utan kikapcsoljuk a villanyt
+    if( currentmilis - last_backlight_on_millis > 60000)
      {
       lcd.noBacklight();
+      lcd_displaymode = 0;
+      lcd_vilagit=0;
      }
 
     // Kapcsoljuk be gombnyomásra az LCD vilagitast
@@ -1556,12 +1593,30 @@ void loop(void) {
     // val = LOW ha meg van nyomva
     val = digitalRead(BACKLIGHT_PIN);
     if( val == LOW )
-    {
-      if( currentmilis - last_backlight_on_millis > 5000 )
+    {    
+      if( currentmilis - last_backlight_on_millis > 300 )
       {
-        lcd.backlight();
-        last_backlight_on_millis = currentmilis;
+        if( lcd_vilagit == 0)
+        {
+          // Azért nyomta meg mert nem világított
+          lcd.backlight();
+          last_backlight_on_millis = currentmilis;
+          lcd_vilagit=1;  
+        }
+        else
+        {
+          // már világítunk...
+          // és megint megnyomja akkor  
+          // akkor a bonyolult kijelzést kéri
+          // vagy eppen az egyszerűt
+          if( lcd_displaymode == 0 ) lcd_displaymode = 1;
+          else lcd_displaymode = 0;
+          lcd_display_info();
+        }
+        
+        
       }
+      
     }
 
 
