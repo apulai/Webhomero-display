@@ -1,6 +1,5 @@
-
-
 #include <SparkFunBME280.h>
+#include "Adafruit_Si7021.h"
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
@@ -8,7 +7,11 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <LiquidCrystal_I2C.h>
-#include <ButtonDebounce.h>
+//#include <ButtonDebounce.h>
+// Include NTPclient libraries
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <time.h>
 
 #define MAXSENSOR         2
 #define SENSOR_IDLE       0
@@ -16,6 +19,14 @@
 #define SENSOR_CONNECTED  2
 #define SENSOR_HASDATA    3
 #define SENSOR_DATAREAD   4
+
+// May have to be changed at daylaight savings
+// Deli Osztrak timezone
+//#define TIMEZONE        10
+// Pulus timezone
+#define TIMEZONE        1
+// 10 percenkent frissitjuk az idot az NTP serverrol
+#define NTP_REFRESH     600000
 
 // D5-ös láb
 #define BACKLIGHT_PIN 14
@@ -30,9 +41,14 @@ const char* password1 = "pass1";
 const char* ssid2 = "ssid2";
 const char* password2 = "pass2";
 
+//const char* ntp_pool = "au.pool.ntp.org";
+const char* ntp_pool = "europe.pool.ntp.org";
+
 String tspapiKey = "thingspeak-api-writekey";
 int tspfield = 1;
 float tempadjust = -2.5;
+float humadjust = 0.0;
+float pressadjust = 0.0;
 float tempfirstsample = 0.0;
 
 int villogas = 1;
@@ -41,17 +57,24 @@ int debug = 0;
 uint8_t sensorid = 1;
 
 int i2caddr_bme280 = 0x76;
+int fake_bme = 0;       // Si7021 alias fake BME280, ScanI2C will adjust this
 
 // Legfontosabb sor!
-LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
+LiquidCrystal_I2C lcd(0x3F, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
 
 // Normal vars
 const int led = BUILTIN_LED;
 unsigned long currentmilis, prevmilis;
-unsigned long last_tsp_milis, last_blink_milis, last_rootload_milis, last_lcdupdate_milis, last_backlight_on_millis;
+unsigned long last_tsp_milis, last_blink_milis, last_rootload_milis, last_lcdupdate_milis, last_lcd_time_update_millis, last_backlight_on_millis;
 
 int init_bme280 = 255; // 255 sikertelen, 0 sikeres
 int ledstatus = 0;
+
+// NTP client
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, ntp_pool, TIMEZONE*3600, NTP_REFRESH);
+time_t now;
+struct tm *now2;
 
 struct sensordata
 {
@@ -73,6 +96,7 @@ int display_field=0;
 
 WiFiClient client;
 BME280 mySensor;
+Adafruit_Si7021 myFakeSensor; // = Adafruit_Si7021();
 ESP8266WebServer server(80);
 
 WiFiEventHandler stationDisconnectedHandler;
@@ -251,6 +275,11 @@ void scan_I2Cbus()
         Serial.print("0");
       Serial.print(address, HEX);
       Serial.print("  !\n");
+      if (address == 0x40) {    // Fake BME280 found!!! Si7021 has 2 addresses, 0x40 is one of them (0x76 the other)
+          fake_bme = 1;
+          Serial.print("Fake BME280 (Si7021) found at address: 0x");
+          Serial.println(address, HEX);
+      }
       nDevices++;
     }
     else if (error == 4)
@@ -366,23 +395,87 @@ int setup_bme280(byte address)
 }
 
 
+int setup_fake_bme280()
+{
+  float t;
+
+  myFakeSensor = Adafruit_Si7021();
+  Serial.print("\nStarting FAKE BME280 (Si7021) at address 0x76 and 0x40");
+
+  if (!myFakeSensor.begin()) {
+    Serial.println(": FAILED. Did not find Si7021 sensor!");
+    init_bme280 = 255;
+  } else {
+    Serial.print(": SUCCESS");
+    init_bme280 = 0;
+    t = readadjustedtemp();
+    tempfirstsample = t;
+    Serial.print("\nsetup_fake_bme280: Temp: ");
+    Serial.print(t);
+    Serial.print("\nsetup_fake_bme280: Humidity: ");
+    Serial.print(myFakeSensor.readHumidity());
+    Serial.print("\nsetup_fake_bme280: Pressure: HAHAHA. Si7021 doesn't do pressure!");
+    Serial.print("\nsetup_fake_bme280: finished\n");
+  }
+     
+  return init_bme280;
+}
+
+
+
 // forced módban működő szenzorral mér
 // igazított értéket ad vissza
 float readadjustedtemp()
 {
   float t = 0.0;
 
-  mySensor.setMode(MODE_FORCED); //Wake up sensor and take reading
-  while (mySensor.isMeasuring() == false) ; //Wait for sensor to start measurment
-  while (mySensor.isMeasuring() == true) ; //Hang out while sensor completes the reading
+  if (fake_bme) {
+    t = myFakeSensor.readTemperature();
+    
+  } else {
+    mySensor.setMode(MODE_FORCED); //Wake up sensor and take reading
+    while (mySensor.isMeasuring() == false) ; //Wait for sensor to start measurment
+    while (mySensor.isMeasuring() == true) ; //Hang out while sensor completes the reading
 
-  t = mySensor.readTempC();
+    t = mySensor.readTempC();
+  }
   Serial.print("\nreadadjustedtemp: Sensor reports:");
   Serial.print( t );
   Serial.print(" adjusting to ");
   Serial.print(t + tempadjust);
+  Serial.print(" NTPtime: ");
+  timeClient.update();
+  Serial.print(timeClient.getFormattedTime());
+
   return ( t + tempadjust );
 }
+
+float readadjustedhum()
+{
+  float h = 0.0;
+
+  if (fake_bme) {
+    h = myFakeSensor.readHumidity();    
+  } else {
+    h = mySensor.readFloatHumidity();
+  }
+    return ( h + humadjust );
+}
+
+
+float readadjustedpress()
+{
+  float p = 0.0;
+
+  if (fake_bme) {
+    p = 0;  
+  } else {
+    p = mySensor.readFloatPressure();
+  }
+  return ( p + pressadjust );
+}
+
+
 
 // Log to ThingSpeak
 // debug módban, vagy ha üres a tspapiKey 
@@ -398,9 +491,9 @@ void logtsp()
   currentmilis = millis();
 
   t = readadjustedtemp();
-  h = mySensor.readFloatHumidity();
-  p = mySensor.readFloatPressure();
-
+  h = readadjustedhum();
+  p = readadjustedpress();
+  
   str_f1 += (String)tspfield;
   str_f2 += (String)(tspfield + 1);
   str_f3 += (String)(tspfield + 2);
@@ -492,7 +585,7 @@ void handleRoot() {
   message += "\n<br><a href=\"http://" + myip + "/t\"> M&eacute;rt adatok /t</a>";
   message += "\n<br><a href=\"http://" + myip + "/print24\"> M&eacute;rt adatok 24 ora alatt/t</a>";
   message += "\n<br><a href=\"http://" + myip + "/collectnew\"> Uj adatok gyujtese /collectnew</a>";
- message += "\n<br><a href=\"http://" + myip + "/backlight\"> hattervilagitas be /backlight</a>";
+  message += "\n<br><a href=\"http://" + myip + "/backlight\"> hattervilagitas be /backlight</a>";
 
   Serial.print("\n\nhandleRoot Uptime (s): ");
   Serial.print( easyreadtime( currentmilis ) );
@@ -504,9 +597,9 @@ void handleRoot() {
   Serial.print("\nhandleRoot Temp firstsample: ");
   Serial.print(tempfirstsample);
   Serial.print("\nhandleRoot Humidity: ");
-  Serial.print(mySensor.readFloatHumidity());
+  Serial.print(readadjustedhum());
   Serial.print("\nhandleRoot Pressure: ");
-  Serial.print(mySensor.readFloatPressure());
+  Serial.print(readadjustedpress());
 
   message += "\n<br><br> Temp: ";
   message += readadjustedtemp();
@@ -515,17 +608,17 @@ void handleRoot() {
   message += "\n<br> Temp firstsample: ";
   message += tempfirstsample;
   message += "\n<br> Humidity: ";
-  message += mySensor.readFloatHumidity();
+  message += readadjustedhum();
   message += "\n<br> Pressure: ";
-  message += mySensor.readFloatPressure();
+  message += readadjustedpress();
 
   // Wget sorok
   message += "<br><br>\n DATA;";
   message += readadjustedtemp();
   message += ";";
-  message += mySensor.readFloatHumidity();
+  message += readadjustedhum();
   message += ";";
-  message += mySensor.readFloatPressure();
+  message += readadjustedpress();
 
   message += "<br><br>\n ";
   message += wifi_event;
@@ -587,9 +680,9 @@ void handlet() {
   message += ";T:";
   message += readadjustedtemp();
   message += ";H:";
-  message += mySensor.readFloatHumidity();
+  message += readadjustedhum();
   message += ";P:";
-  message += mySensor.readFloatPressure();
+  message += readadjustedpress();
   message += ";";
   message += minmax_last24h();
   message += ";SSID:";
@@ -763,6 +856,8 @@ void handlebacklight()
   lcd.backlight();
   handleRoot();
 }
+
+
 void onStationDisconnected(const WiFiEventSoftAPModeStationDisconnected& evt) {
   // nem tudom jó lesz-e
   // ha lejár a MAC lease, akkor kidob-e...
@@ -956,10 +1051,25 @@ void lcd_display_info()
   //Serial.print("\nlcd update");
   last_lcdupdate_milis=millis();
   lcd.home();
-  lcd.clear();
+  // ez villogtatja a kepernyot, inkabb csak kiirunk ures stringet, es megnezzuk, hogy mit csinal
+  //lcd.clear();
+ 
+  // Meg egy kicsit ugy atirtuk, hogy a felso sorban mindig mutassa a homersekletet local/remote, utana sor datum/ido (NTP), utana ket sor valtozzon csak
+  lcd.setCursor(0, 0);
+  lcd.print("                    ");
+  lcd.setCursor(0, 0);
+    
+  lcd.print("Ti:");
+  lcd.print(sensor[0].t);
+  lcd.print(" To:");
+  lcd.print(sensor[1].t);
+
+  
   for (i = 0; i < MAXSENSOR; i++)
   {
-    lcd.setCursor(0, i);
+    lcd.setCursor(0, i+2);
+    lcd.print("                    ");
+    lcd.setCursor(0, i+2);
     lcd.print("T:");
     lcd.print(sensor[i].t);
 
@@ -982,18 +1092,18 @@ void lcd_display_info()
               lcd.print(sensor[i].p);
               break;
       case 4: 
-              lcd.setCursor(0, i);
+              lcd.setCursor(0, i+2);
               lcd.print("                    ");
-              lcd.setCursor(0, i);
+              lcd.setCursor(0, i+2);
               lastreadmillisago=millis()-sensor[i].lastconnectedmillis;
               lcd.print(sensor[i].hostname);
               lcd.print(" ");
               lcd.print(easyreadtime(lastreadmillisago));
               break;
         case 5: 
-              lcd.setCursor(0, i);
+              lcd.setCursor(0, i+2);
               lcd.print("                    ");
-              lcd.setCursor(0, i);
+              lcd.setCursor(0, i+2);
               lcd.print("dBm:");
               lcd.print(sensor[i].rssi);
               lcd.print(" @ ");
@@ -1004,10 +1114,42 @@ void lcd_display_info()
   }
   display_field++;
   display_field = display_field % 6;
-  lcd.setCursor(0,3);
-  lcd.print("Frissitesig: ");
-  lcd.print(easyreadtime(REMOTE_UPDATE- (currentmilis - last_tsp_milis)));
+//  lcd.setCursor(0,3);
+//  lcd.print("Time2refresh: ");
+//  lcd.print(easyreadtime(REMOTE_UPDATE- (currentmilis - last_tsp_milis)));
+
+// This only refreshes time every 5 secs, not so nice
+//    timeClient.update();
+//    lcd.print("NTPtime: ");
+//    lcd.print(timeClient.getFormattedTime());
 }
+
+
+void lcd_display_time(void) {
+  last_lcd_time_update_millis = millis();
+  lcd.home();
+  lcd.setCursor(0,1);
+
+  timeClient.update();
+  
+  now = timeClient.getEpochTime();
+  now2 = localtime(&now);
+
+  // a datumot csak az epoch time-bol tudjuk kiirni, mert nincs r fuggveny az NTPClient library-ban
+  lcd.print(now2->tm_year+1900);
+  lcd.print("/");
+  if (now2->tm_mon+1 < 10) 
+    lcd.print(0);
+  lcd.print(now2->tm_mon+1);
+  lcd.print("/");
+  if (now2->tm_mday < 10) 
+    lcd.print(0);
+  lcd.print(now2->tm_mday);
+  lcd.print(" ");  
+  lcd.print(timeClient.getFormattedTime());
+  
+}
+
 
 void setup(void) {
   int res = 1;
@@ -1033,8 +1175,6 @@ void setup(void) {
   lcd.print("Hello, world!");
   lcd.setCursor(0,1);
   lcd.print("Connecting Wifi...");
-
-
 
   do
   {
@@ -1086,10 +1226,15 @@ void setup(void) {
   init_last24h();
 
   scan_I2Cbus();
-  setup_bme280(i2caddr_bme280);
-
   lcd.setCursor(0,3);
-  lcd.print("BME280 sensor OK");
+  if (fake_bme) {
+    setup_fake_bme280();
+    lcd.print("Si7021 sensor OK");
+  } else {
+    setup_bme280(i2caddr_bme280);
+    lcd.print("BME280 sensor OK");
+  }
+
   delay(2000);
 
   //lcd.home();
@@ -1112,6 +1257,9 @@ void setup(void) {
     request_remote_sensor_data();
   }
 
+  lcd.clear();
+  // NTP Client
+  timeClient.begin();
 
 }
 
@@ -1234,8 +1382,8 @@ void update_local_sensor_data()
   }
   
   sensor[0].t=readadjustedtemp();
-  sensor[0].p=mySensor.readFloatPressure();
-  sensor[0].h=mySensor.readFloatHumidity();
+  sensor[0].h=readadjustedhum();
+  sensor[0].p=readadjustedpress();
   sensor[0].tmin=tmin;
   sensor[0].tmax=tmax;
   sensor[0].lastconnectedmillis=millis();
@@ -1391,6 +1539,12 @@ void loop(void) {
       lcd_display_info();
      }
 
+    // every 1 sec time on LCD is updated 
+    if( currentmilis - last_lcd_time_update_millis > 1000)
+     {
+      lcd_display_time();
+     }
+
     // 2 perc utan kikapcsoljuk a villanyt
     if( currentmilis - last_backlight_on_millis > 120000)
      {
@@ -1409,6 +1563,9 @@ void loop(void) {
         last_backlight_on_millis = currentmilis;
       }
     }
+
+//    timeClient.update();
+//    Serial.println(timeClient.getFormattedTime());
 
   }
   else
