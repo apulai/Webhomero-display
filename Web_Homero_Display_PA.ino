@@ -41,8 +41,8 @@ float tempfirstsample = 0.0;
 
 int villogas = 1;
 int debug = 0;
-
 uint8_t sensorid = 1;
+uint8_t timezone=2;
 
 int i2caddr_bme280 = 0x76;
 
@@ -69,7 +69,7 @@ LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
 // Normal vars
 const int led = BUILTIN_LED;
 unsigned long currentmilis, prevmilis;
-unsigned long last_tsp_milis, last_blink_milis, last_rootload_milis, last_lcdupdate_milis, last_backlight_on_millis;
+unsigned long last_tsp_milis, last_blink_milis, last_rootload_milis, last_lcdupdate_milis, last_backlight_on_millis, last_wificonnect_millis;
 unsigned long last_lcd_time_update_millis;
 
 int init_bme280 = 255; // 255 sikertelen, 0 sikeres
@@ -118,6 +118,7 @@ struct webhomero_eeprom
   uint8_t villogas;    // villogas ki vagy bekapcsolása
   float tempadjust;       // legfontosabb mező, mennyivel módosítjuk a mért érékeket
 
+  uint8_t timezone;     // idozona
   int length_tspapiKey;
   String tspapiKey;
   int length_wifi1_ssid;
@@ -204,6 +205,11 @@ boolean eeprom_read()
   i += sizeof(float);
   Serial.print("\nmyeprom.tempadjust: "); Serial.print(myeprom.tempadjust);
 
+  //read timezone
+  myeprom.timezone = EEPROM.read(i);
+  i += sizeof(uint8_t);
+  Serial.print("\nmyeprom.timezone: "); Serial.print(myeprom.timezone);
+  
   if ( myeprom.isinited == 1) return true;
   return false;
 }
@@ -244,6 +250,12 @@ boolean eeprom_write()
   EEPROM.put(i, f);
   i += sizeof(float);
   Serial.print("\nWriting myeprom.tempadjust: "); Serial.print(f);
+
+  //write timezone
+  u = myeprom.timezone;
+  EEPROM.write(i, u);
+  i += sizeof(uint8_t);
+  Serial.print("\nWriting myeprom.timezone: "); Serial.print(u);
 
   Serial.print("\nEEPROM commit... ");
   EEPROM.commit();
@@ -706,6 +718,16 @@ void handleset() {
       msg2 += villogas;
     }
 
+if ( server.argName(i) == "timezone" )
+    {
+
+      s2 = (String)server.arg(i);
+      timezone = s2.toInt();
+      myeprom.timezone = timezone;
+      msg2 += "\timezone updated: ";
+      msg2 += timezone;
+      timeClient.setTimeOffset(timezone*3600);
+    }
     if ( server.argName(i) == "sensorid" )
     {
       s2 = (String)server.arg(i);
@@ -756,21 +778,25 @@ void handleSetup()
 \n  <td><input type=\"text\" name=\"adjust\" maxlength=\"5\" value=\"";
   message += tempadjust;
   message += "\"></td></tr> \
-\n  <tr><td>ThingSpeak Channel: \
+\n  <tr><td>ThingSpeak Channel: </td>\
 \n  <td><input type=\"text\" name=\"tspapikey\" value=\"";
   message += tspapiKey;
   message += "\"></td></tr> \
-\n  <tr><td>ThingSpeak starting filed number (if empty skip upload) : \
+\n  <tr><td>ThingSpeak starting filed number (if empty skip upload) :</td> \
 \n  <td><input type=\"text\" name=\"tspfield\" maxlength=\"5\" value=\"";
   message += tspfield;
   message += "\"></td></tr> \
-\n  <tr><td>Villogas: \
+\n  <tr><td>Villogas: </td>\
 \n  <td><input type=\"text\" name=\"villogas\" maxlength=\"1\" value=\"";
   message += villogas;
   message += "\"></td></tr> \
-\n  <tr><td>SensorID: \
+\n  <tr><td>SensorID: </td>\
 \n  <td><input type=\"text\" name=\"sensorid\" maxlength=\"2\" value=\"";
   message += sensorid;
+  message += "\"></td></tr> \
+\n  <tr><td>Timezone: 2 hudst 3hu winter 10 nsw winter</td>\
+\n  <td><input type=\"text\" name=\"timezone\" maxlength=\"2\" value=\"";
+  message += timezone;
   message += "\"></td></tr> \
 \n  <tr><td>\
 \n  <input type=\"submit\" name=\"submit\" value=\"Save\"></td></tr> \
@@ -1251,6 +1277,8 @@ void setup(void) {
     villogas = myeprom.villogas;
     tspfield = myeprom.tspfield;
     sensorid = myeprom.sensorid;
+    timezone = myeprom.timezone;
+    timeClient.setTimeOffset(timezone*3600);
   }
 
   server.on("/", handleRoot);
@@ -1594,11 +1622,13 @@ void loop(void) {
     val = digitalRead(BACKLIGHT_PIN);
     if( val == LOW )
     {    
-      if( currentmilis - last_backlight_on_millis > 300 )
+      if( currentmilis - last_backlight_on_millis > 1000 )
       {
+        Serial.print("\nButton pressed");
         if( lcd_vilagit == 0)
         {
           // Azért nyomta meg mert nem világított
+          Serial.print("\nButton pressed, lcd light on");
           lcd.backlight();
           last_backlight_on_millis = currentmilis;
           lcd_vilagit=1;  
@@ -1609,6 +1639,8 @@ void loop(void) {
           // és megint megnyomja akkor  
           // akkor a bonyolult kijelzést kéri
           // vagy eppen az egyszerűt
+          Serial.print("\nButton pressed, lcd light already on, change display mode");
+          last_backlight_on_millis = currentmilis;
           if( lcd_displaymode == 0 ) lcd_displaymode = 1;
           else lcd_displaymode = 0;
           lcd_display_info();
@@ -1635,6 +1667,15 @@ void loop(void) {
     {
       blink();
     }
+    // Ha nem kapcsolódunk pl. nem sikerült az setupban
+    // akkor két percenként azért próbálkozunk
+    if (  WiFi.status() != WL_CONNECTED && currentmilis - last_wificonnect_millis > 120000 )
+    {
+      Serial.print("\nTrying to connect to wifi");
+      last_wificonnect_millis=currentmilis;
+      findandconnectstrongestwifi();
+    }
+    
 
   }
 
