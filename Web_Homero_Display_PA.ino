@@ -28,11 +28,11 @@
 
 // Global vars
 #define KNOWNNET 6
-String knownssid[KNOWNNET] = { "placeholderforeeprom", "xxx"     , "xxx"      , "xxx"     , "xxx"     , "xxx"};
-String knownpassword[KNOWNNET] = {"placeholderforeeprom", "xxx"  , "xxx" , "xxx" , "xxx" , "xxx"};
+String knownssid[KNOWNNET] = { "placeholderforeeprom", "konnyubob"     , "Pulus"      , "Pulus2"     , "Pulus3"     , "Rozsa41a"};
+String knownpassword[KNOWNNET] = {"placeholderforeeprom", "rozsa38a"  , "Brassoi10b" , "Brassoi10b" , "Brassoi10b" , "JON56000"};
 
 int debug = 0;
-
+int prevcons = -1;
 int i2caddr_bme280 = 0x76;
 
 // NTP client
@@ -59,6 +59,23 @@ int lcd_vilagit = 0;
 // 0 egyszeru modon irjuk ki
 // 1 bonyulultan irjuk ki
 int lcd_displaymode = 0;
+
+uint8_t celsiusChar[8] = {0x8, 0xf4, 0x8, 0x43, 0x4, 0x4, 0x43, 0x0};
+#define CELSIUS 0
+uint8_t smallConsLeftChar[8] = {0x0, 0x0, 0x0, 0x1, 0x2, 0xc, 0x10, 0x1f};
+#define SMALL_CONS_LEFT 1
+uint8_t smallConsRightChar[8] = {0x0, 0xf, 0x11, 0xd, 0xd, 0x1, 0x1, 0x1f};
+#define SMALL_CONS_RIGHT 2
+
+uint8_t starChar[6][8] = {
+  0x0, 0x3, 0x4, 0x8, 0x8, 0x10, 0x17, 0x11,
+  0x1f, 0x0, 0x4, 0x4, 0xe, 0x1f, 0x1f, 0x1f,
+  0x0, 0x18, 0x4, 0x2, 0x2, 0x1, 0x1d, 0x11,
+  0x10, 0x10, 0x10, 0x9, 0x9, 0x4, 0x3, 0x0,
+  0x1f, 0x1f, 0x1b, 0x11, 0x0, 0x0, 0x0, 0x1f,
+  0x1, 0x1, 0x1, 0x12, 0x12, 0x4, 0x18, 0x0
+};
+
 
 struct sensordata
 {
@@ -106,8 +123,9 @@ struct config_data
   char extsensor1ip[100];
   char extsensor2ip[100];
   char extsensor3ip[100];
+  uint8_t consimage; // which cons image to display
   uint8_t lastbyte; // Ide 237-et írunk ha inicializalva van
-} myeprom,defaultset,workingset;
+} myeprom, defaultset, workingset;
 
 // 24 merest tarolunk, hogy tudjuk mikor volt a nap
 // leghidegebb es legmelegebb tagja
@@ -126,23 +144,25 @@ int last24curpos = 0;
 
 void config_init_defaultset()
 {
-strcpy(defaultset.tspapikey,"xxx");
-defaultset.tspfield = 1;
-defaultset.tempadjust = -2.5;  
-defaultset.sensorid = 1;
-//defaultset.ntp_pool = "au.pool.ntp.org";
-strcpy(defaultset.ntppool,"europe.pool.ntp.org");
-// Timezone 2 CET, Timezone 10 NSW
-defaultset.timezone = 2;
-defaultset.villogas = 1;
+  strcpy(defaultset.tspapikey, "D21KG475VQLWXSD7");
+  defaultset.tspfield = 4;
+  defaultset.tempadjust = -2.5;
+  defaultset.sensorid = 1;
+  //defaultset.ntp_pool = "au.pool.ntp.org";
+  strcpy(defaultset.ntppool, "europe.pool.ntp.org");
+  // Timezone 2 CET, Timezone 10 NSW
+  defaultset.timezone = 2;
+  defaultset.villogas = 1;
 
-defaultset.maxsensor=3;
-strcpy(defaultset.extsensor1ip,"192.168.1.191");
-strcpy(defaultset.extsensor2ip,"192.168.1.192");
-strcpy(defaultset.extsensor3ip,"192.168.1.193");
+  defaultset.maxsensor = 3;
+  strcpy(defaultset.extsensor1ip, "192.168.1.191");
+  strcpy(defaultset.extsensor2ip, "192.168.1.192");
+  strcpy(defaultset.extsensor3ip, "192.168.1.193");
 
-knownssid[0].toCharArray(defaultset.wifissid, 50);
-knownpassword[0].toCharArray(defaultset.wifipass,50);
+  knownssid[0].toCharArray(defaultset.wifissid, 50);
+  knownpassword[0].toCharArray(defaultset.wifipass, 50);
+
+  defaultset.consimage = 1;
 }
 
 
@@ -204,7 +224,9 @@ void serial_print_config(struct config_data *p)
   Serial.print("\n .extsensor2ip: ");
   Serial.print(p->extsensor2ip);
   Serial.print("\n .extsensor3ip: ");
-  Serial.print(p->extsensor3ip);  
+  Serial.print(p->extsensor3ip);
+  Serial.print("\n .consimage: ");
+  Serial.print(p->consimage);
   Serial.print("\n .lastbyte: ");
   Serial.print(p->lastbyte);
 }
@@ -233,7 +255,7 @@ boolean eeprom_write()
 
   myeprom.isinited = 1;
   myeprom.lastbyte = 237;
-  
+
   EEPROM.put(0, myeprom);
 
   Serial.print("\neeprom write: commiting. ");
@@ -514,12 +536,15 @@ void handleRoot() {
   message += "\n<body> Hello from esp8266!";
   message += "\n<br> This is sensor: ";
   message += workingset.sensorid;
+  message += "\n<br> Serial menu is available 115200 baud to enter new ssid";
 
   message += "\n<br><br><a href=\"http://" + myip + "/setup\"> Be&aacute;llit&aacute;sok /setup</a>";
   message += "\n<br><a href=\"http://" + myip + "/t\"> M&eacute;rt adatok /t</a>";
   message += "\n<br><a href=\"http://" + myip + "/print24\"> M&eacute;rt adatok 24 ora alatt/t</a>";
   message += "\n<br><a href=\"http://" + myip + "/collectnew\"> Uj adatok gyujtese /collectnew</a>";
-  message += "\n<br><a href=\"http://" + myip + "/backlight\"> hattervilagitas be /backlight</a>";
+  message += "\n<br><a href=\"http://" + myip + "/backlight\"> Hattervilagitas be /backlight</a>";
+  message += "\n<br><a href=\"http://" + myip + "/reconnect\"> Ujracsatlakozas a legerosebb wifihez /reconnect </a> Visszaadja a fooldalt majd 10s mulva ujracsatlakozik";
+
 
   Serial.print("\n\nhandleRoot Uptime (s): ");
   Serial.print( easyreadtime( currentmilis ) );
@@ -548,7 +573,7 @@ void handleRoot() {
   message += sensor[1].t;
   message += "\n<br> Sensor[2].t: ";
   message += sensor[2].t;
-  
+
   message += "<br><br>\n ";
   message += wifi_event;
 
@@ -579,7 +604,7 @@ void handleRoot() {
 
   message += "\n<br>\n<br> Page generated at: ";
   message += get_string_time();
-  
+
   message += "\n</body></html>\n";
 
   server.send(200, "text/html", message);
@@ -626,6 +651,12 @@ void handlet() {
   server.send(200, "text/plain", message);
 }
 
+void handlereconnect() {
+  handleRoot();
+  delay(10000);
+  findandconnectstrongestwifi();
+}
+
 void handleprint24() {
   digitalWrite(led, 0);
   String message = print_last24h();
@@ -635,7 +666,8 @@ void handleprint24() {
 void handlecollectnewdata() {
   digitalWrite(led, 0);
   request_remote_sensor_data();
-  server.send(200, "text/plain", "Collecting new info for lcd");
+  handleRoot();
+  //server.send(200, "text/plain", "Collecting new info for lcd");
 }
 
 
@@ -771,7 +803,16 @@ void handleset() {
       msg2 += "\nextsensor3ip updated: ";
       msg2 += myeprom.extsensor3ip;
     }
-    
+
+    if ( server.argName(i) == "consimage" )
+    {
+      s2 = (String)server.arg(i);
+      tempint = s2.toInt();
+      myeprom.consimage = tempint;
+      msg2 += "\nconsimage: ";
+      msg2 += myeprom.consimage;
+    }
+
     if ( server.argName(i) == "store" )
     {
       s2 = (String)server.arg(i);
@@ -793,26 +834,26 @@ void handleset() {
   if ( commit == 1) eeprom_write();
 
   // Copy myeprom data to workingset all at once
-  message += "\nCopying eeprom data to workingset";  
+  message += "\nCopying eeprom data to workingset";
 
-  memcpy(&workingset,&myeprom,sizeof(struct config_data));
+  memcpy(&workingset, &myeprom, sizeof(struct config_data));
 
   Serial.print("\n handleset: content of workingset config\n");
   serial_print_config(&workingset);
-  knownssid[0]=workingset.wifissid;
-  knownpassword[0]=workingset.wifipass;
+  knownssid[0] = workingset.wifissid;
+  knownpassword[0] = workingset.wifipass;
   timeClient.setTimeOffset(workingset.timezone * 3600);
-//  timeClient.setPoolServerName(workingset.ntppool);
-  if( workingset.maxsensor > MAXSENSOR ) workingset.maxsensor = MAXSENSOR;
+  //  timeClient.setPoolServerName(workingset.ntppool);
+  if ( workingset.maxsensor > MAXSENSOR ) workingset.maxsensor = MAXSENSOR;
   sensor[0].hostname = "localhost";
   sensor[0].status = SENSOR_IDLE;
   sensor[1].hostname = workingset.extsensor1ip;
   sensor[1].status = SENSOR_IDLE;
   sensor[2].hostname = workingset.extsensor2ip;
-  sensor[2].status = SENSOR_IDLE;  
+  sensor[2].status = SENSOR_IDLE;
   sensor[3].hostname = workingset.extsensor3ip;
-  sensor[3].status = SENSOR_IDLE;  
-  
+  sensor[3].status = SENSOR_IDLE;
+
   server.send(200, "text/plain", message);
 }
 
@@ -864,23 +905,28 @@ void handleSetup()
 \n  <tr><td>NTP pool</td>\
 \n  <td><input type=\"text\" name=\"ntppool\" maxlength=\"100\" value=\"";
   message += workingset.ntppool;
-  message += "\"></td></tr> \  
+  message += "\"></td></tr> \
 \n  <tr><td>Number of sensors (including this)</td>\
 \n  <td><input type=\"text\" name=\"maxsensor\" maxlength=\"1\" value=\"";
   message += workingset.maxsensor;
-  message += "\"></td></tr> \  
+  message += "\"></td></tr> \
 \n  <tr><td>External Sensor 1 IP addr</td>\
 \n  <td><input type=\"text\" name=\"extsensor1ip\" maxlength=\"100\" value=\"";
   message += sensor[1].hostname; \
-  message += "\"></td></tr>  \  
+  message += "\"></td></tr>  \
 \n  <tr><td>External Sensor 2 IP addr</td>\
 \n  <td><input type=\"text\" name=\"extsensor2ip\" maxlength=\"100\" value=\"";
   message += sensor[2].hostname; \
-  message += "\"></td></tr> \  
+  message += "\"></td></tr> \
 \n  <tr><td>External Sensor 3 IP addr</td>\
 \n  <td><input type=\"text\" name=\"extsensor3ip\" maxlength=\"100\" value=\"";
   message += sensor[3].hostname; \
-  message += "\"></td></tr> \  
+  message += "\"></td></tr> \
+\n  <tr><td>Cons image to display 0:none 1:small 2:big</td>\
+\n  <td><input type=\"text\" name=\"consimage\" maxlength=\"1\" value=\"";
+  message += workingset.consimage; \
+  message += "\"></td></tr> \
+\
 \n  <tr><td>\
 \n  <input type=\"submit\" name=\"submit\" value=\"Save\"></td></tr> \
 \n  <tr><td>\
@@ -902,7 +948,7 @@ void handlebacklight()
 }
 
 // nem tudom jó lesz-e
-// ha lejár a MAC lease, akkor kidob-e... 
+// ha lejár a MAC lease, akkor kidob-e...
 void onStationDisconnected(const WiFiEventSoftAPModeStationDisconnected& evt) {
   int res = 1;
   Serial.print("Station disconnected: ");
@@ -1043,10 +1089,10 @@ int findandconnectstrongestwifi()
       }
     }
     //Serial.print("\nScanned password database(end of for)");
-     // Ha nem sikerült csatlakozni
+    // Ha nem sikerült csatlakozni
     if ( isconnected != 0 )
     {
-        // Keresünk új célpontot
+      // Keresünk új célpontot
       Serial.print("\nNot connected, looking for new target");
       target = strongestsignalbelowdbm(n, WiFi.RSSI(target));
 
@@ -1082,7 +1128,7 @@ void blink()
 }
 
 // Inicializalja azt a tombot amibe az utolso
-// 24 ora legkisebb es legnagyobb homerkletet 
+// 24 ora legkisebb es legnagyobb homerkletet
 // gyujtjuk
 void init_last24h()
 {
@@ -1203,6 +1249,51 @@ void lcd_display_info()
   else lcd_display_info_full();
 }
 
+void lcd_display_cons()
+{
+  int i;
+  switch ( workingset.consimage)
+  {
+    case 0:
+      break;
+      if (prevcons != 0)
+      {
+        lcd.createChar(CELSIUS, celsiusChar);
+      }
+      prevcons = 0;
+    case 1:
+      if (prevcons != 1)
+      {
+        lcd.createChar(CELSIUS, celsiusChar);
+        lcd.createChar(SMALL_CONS_LEFT, smallConsLeftChar);
+        lcd.createChar(SMALL_CONS_RIGHT, smallConsRightChar);
+      }
+      lcd.setCursor(18, 1);
+      lcd.print((char)SMALL_CONS_LEFT);
+      lcd.print((char)SMALL_CONS_RIGHT);
+      prevcons = 1;
+      break;
+    case 2:
+      if (prevcons != 2)
+      {
+        lcd.createChar(CELSIUS, celsiusChar);
+        //
+        for (i = 0; i < 6; i++) {
+          lcd.createChar(i + 1, starChar[i]);
+        }
+      }
+      lcd.setCursor(17, 0);
+      for (i = 0; i < 6; i++) {
+        lcd.print((char)(i + 1));
+        if (i == 2) {
+          lcd.setCursor(17, 1);
+        }
+      }
+      prevcons=2;
+      break;
+  }
+}
+
 void lcd_display_info_simple()
 {
   last_lcdupdate_milis = millis();
@@ -1212,20 +1303,30 @@ void lcd_display_info_simple()
   lcd.setCursor(0, 0);
   lcd.print(" T(itt) :");
   lcd.print(sensor[0].t);
+  lcd.print((char)CELSIUS);
 
   lcd.setCursor(0, 1);
   lcd.print(" T(kint):");
   lcd.print(sensor[1].t);
+  lcd.print((char)CELSIUS);
+
   // Ha több mint tíz perce nem frissült, akkor hibajelzés
-  if( last_lcdupdate_milis - sensor[1].lastconnectedmillis > 600000 ) lcd.print("!");
+  if ( last_lcdupdate_milis - sensor[1].lastconnectedmillis > 600000 ) lcd.print("!");
   else lcd.print(" ");
 
   lcd.setCursor(0, 2);
   lcd.print(" T(fent):");
   lcd.print(sensor[2].t);
+  lcd.print((char)CELSIUS);
+
   // Ha több mint tíz perce nem frissült, akkor hibajelzés
-  if( last_lcdupdate_milis - sensor[2].lastconnectedmillis > 600000 ) lcd.print("!");
+  if ( last_lcdupdate_milis - sensor[2].lastconnectedmillis > 600000 ) lcd.print("!");
   else lcd.print(" ");
+
+  if ( sensor[1].t < 30 && sensor[1].t > -5 )
+  {
+    lcd_display_cons();
+  }
 
 }
 
@@ -1329,7 +1430,7 @@ String get_string_time(void) {
   s1 += "/";
   if (now2->tm_mon + 1 < 10)
     s1 += "0";
-  
+
   s1 += now2->tm_mon + 1;
   s1 += "/";
   if (now2->tm_mday < 10)
@@ -1343,12 +1444,12 @@ String get_string_time(void) {
 }
 
 void setup(void) {
-  int res = 1;
+  int i, res = 1;
   currentmilis = 0;
   prevmilis = 0;
   pinMode(led, OUTPUT);
   digitalWrite(led, 0);
-  
+
   //gomb pinje
   pinMode(BACKLIGHT_PIN, INPUT_PULLUP);
 
@@ -1360,9 +1461,14 @@ void setup(void) {
 
   lcd.begin(20, 4, LCD_5x8DOTS);       // initialize the lcd for 20 chars 4 lines, turn on backlight
   lcd.backlight();
+  lcd.createChar(CELSIUS, celsiusChar);  
+
+
+
   lcd_vilagit = 1;
   lcd.clear();
   lcd.home();
+
   lcd.setCursor(0, 0); //Start at character 4 on line 0
   lcd.print("Hello, world!");
   delay(1000);
@@ -1370,47 +1476,47 @@ void setup(void) {
 
   // Loading a default set of configuration
   // to the default config set.
-  
+
   config_init_defaultset();
   Serial.print("\nPrinting data of defaultset");
   serial_print_config(&defaultset);
-  
+
   // EEprom init es egy kiolvasas
   EEPROM.begin(1024);
-  
+
   if ( eeprom_read() == false )
   {
     Serial.print("\nEEPROM not initialized");
     lcd.print("EEPROM not inited!");
     // EEPROM is not OK so we will copy defaultset to workingset instead
-    memcpy(&workingset,&defaultset,sizeof(struct config_data)); 
+    memcpy(&workingset, &defaultset, sizeof(struct config_data));
   }
   else
   {
     lcd.print("Loading EEPROM");
     Serial.print("\nEEPROM is initialized");
     Serial.print("\nLoading data from EEPROM");
-    
+
     // EEPROM is OK so we will copy eeprom to workingset instead
-    memcpy(&workingset,&myeprom,sizeof(struct config_data));
+    memcpy(&workingset, &myeprom, sizeof(struct config_data));
   }
   Serial.print("\nPrinting data of workingset");
   serial_print_config(&workingset);
-  knownssid[0]=workingset.wifissid;
-  knownpassword[0]=workingset.wifipass;
+  knownssid[0] = workingset.wifissid;
+  knownpassword[0] = workingset.wifipass;
   timeClient.setTimeOffset(workingset.timezone * 3600);
-//  timeClient.setPoolServerName(workingset.ntppool);
-  if( workingset.maxsensor > MAXSENSOR ) workingset.maxsensor = MAXSENSOR;
+  //  timeClient.setPoolServerName(workingset.ntppool);
+  if ( workingset.maxsensor > MAXSENSOR ) workingset.maxsensor = MAXSENSOR;
   sensor[0].hostname = "localhost";
   sensor[0].status = SENSOR_IDLE;
   sensor[1].hostname = workingset.extsensor1ip;
   sensor[1].status = SENSOR_IDLE;
   sensor[2].hostname = workingset.extsensor2ip;
-  sensor[2].status = SENSOR_IDLE;  
+  sensor[2].status = SENSOR_IDLE;
   sensor[3].hostname = workingset.extsensor3ip;
-  sensor[3].status = SENSOR_IDLE;  
-    
-  lcd.setCursor(0, 1); 
+  sensor[3].status = SENSOR_IDLE;
+
+  lcd.setCursor(0, 1);
   lcd.print("Connecting Wifi...");
 
   findandconnectstrongestwifi();
@@ -1422,7 +1528,7 @@ void setup(void) {
     Serial.println("\nMDNS responder started");
   }
 
- 
+
 
   server.on("/", handleRoot);
   server.on("/set", handleset);
@@ -1431,6 +1537,7 @@ void setup(void) {
   server.on("/print24", handleprint24);
   server.on("/collectnew", handlecollectnewdata);
   server.on("/backlight", handlebacklight);
+  server.on("/reconnect", handlereconnect);
 
   server.onNotFound(handleNotFound);
   server.begin();
@@ -1453,8 +1560,8 @@ void setup(void) {
   timeClient.begin();
 
 
- // Csak akkor csinálunk mérést, ha sikeres volt a bme280 inicializálása
-   if ( init_bme280 == 0 )
+  // Csak akkor csinálunk mérést, ha sikeres volt a bme280 inicializálása
+  if ( init_bme280 == 0 )
   {
     logtsp();
     update_last24h();
@@ -1697,13 +1804,69 @@ void update_remote_sensor_data(int sensorid)
 
 }
 
+void serial_print_menu()
+{
+  Serial.println(F("\n\n1. Enter new SSID"));
+  Serial.println(F("2. Connect to Strongest Wifi"));
+  Serial.println(F("3. Commit to eeprom"));
+  Serial.println(F("\n\n"));
+}
+
+
 void loop(void) {
   int sensorid = 1;
   int val = LOW;
+  String a_input;
+  char ch_input;
 
   currentmilis = millis();
 
   server.handleClient();
+
+  if (Serial.available() > 0) {
+    a_input = Serial.readString(); // read the incoming String:
+    ch_input = a_input.charAt(0);
+
+    Serial.print("\n Input karakter:");
+    Serial.println(a_input);
+    Serial.println(ch_input);
+  }
+
+  switch (ch_input)
+  {
+    case '1': // uj SSID beadasa
+      Serial.print("\nPlease enter a new SSID:");
+      while (Serial.available() == 0);
+      a_input = Serial.readString();
+      a_input.toCharArray(myeprom.wifissid, 50);
+      Serial.print(myeprom.wifissid);
+
+      Serial.print("\nPlease enter a new wifi password:");
+      while (Serial.available() == 0);
+      a_input = Serial.readString();
+      a_input.toCharArray(myeprom.wifipass, 50);
+      Serial.print(myeprom.wifipass);
+
+      knownssid[0] = myeprom.wifissid;
+      knownpassword[0] = myeprom.wifipass;
+      serial_print_menu();
+      break;
+
+    case '2': // Connect Strongest Wifi
+      Serial.print("\n Connecting to strongest wifi");
+      findandconnectstrongestwifi();
+      serial_print_menu();
+      break;
+
+    case '3': // Commit to eeprom
+      Serial.println("Commiting data to eeprom");
+      eeprom_write();
+      serial_print_menu();
+      break;
+
+      //default: // Something was entered but we do not know what...
+      //  serial_print_menu();
+  }
 
   // Csak akkor csinálunk mérést ha sikeres volt a BME280 inicialitalasa
   // es csatlakoztunk is
@@ -1716,6 +1879,7 @@ void loop(void) {
       update_last24h();
       update_local_sensor_data();
       request_remote_sensor_data();
+      serial_print_menu();
     }
 
     //
@@ -1726,6 +1890,7 @@ void loop(void) {
       read_remote_sensor_data(sensorid);
       update_remote_sensor_data(sensorid);
       sensorid = -1;
+      serial_print_menu();
     }
     // Blink LED every 2 sec
     if ( currentmilis - last_blink_milis > 2000 )
