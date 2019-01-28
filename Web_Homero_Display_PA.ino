@@ -7,6 +7,7 @@
 #include <EEPROM.h>
 #include <LiquidCrystal_I2C.h>
 #include <ButtonDebounce.h>
+#include <ThingSpeak.h>
 
 // Include NTPclient libraries
 #include <NTPClient.h>
@@ -23,13 +24,16 @@
 // D5-os lab
 #define BACKLIGHT_PIN 14
 
+// LOOK FOR CHANGEME 
+// in function config_init_defaultset()
+
 // tavoli szenszor frissites (ms)
 #define REMOTE_UPDATE 300000
 
 // Global vars
 #define KNOWNNET 6
-String knownssid[KNOWNNET] = { "placeholderforeeprom", "konnyubob"     , "Pulus"      , "Pulus2"     , "Pulus3"     , "Rozsa41a"};
-String knownpassword[KNOWNNET] = {"placeholderforeeprom", "rozsa38a"  , "Brassoi10b" , "Brassoi10b" , "Brassoi10b" , "JON56000"};
+String knownssid[KNOWNNET] = { "placeholderforeeprom", "sid"     , "sid"      , "sid"     , "sid"     , "sid"};
+String knownpassword[KNOWNNET] = {"placeholderforeeprom", "passwd"  , "passwd" , "passwd" , "passwd" , "passwd"};
 
 int debug = 0;
 int prevcons = -1;
@@ -124,6 +128,7 @@ struct config_data
   char extsensor2ip[100];
   char extsensor3ip[100];
   uint8_t consimage; // which cons image to display
+  unsigned long channelid;
   uint8_t lastbyte; // Ide 237-et írunk ha inicializalva van
 } myeprom, defaultset, workingset;
 
@@ -144,7 +149,8 @@ int last24curpos = 0;
 
 void config_init_defaultset()
 {
-  strcpy(defaultset.tspapikey, "D21KG475VQLWXSD7");
+  // CHANGEME
+  strcpy(defaultset.tspapikey, "CHANGEME________");
   defaultset.tspfield = 4;
   defaultset.tempadjust = -2.5;
   defaultset.sensorid = 1;
@@ -161,7 +167,8 @@ void config_init_defaultset()
 
   knownssid[0].toCharArray(defaultset.wifissid, 50);
   knownpassword[0].toCharArray(defaultset.wifipass, 50);
-
+  // CHANGEME
+  defaultset.channelid = 111111;
   defaultset.consimage = 1;
 }
 
@@ -227,6 +234,8 @@ void serial_print_config(struct config_data *p)
   Serial.print(p->extsensor3ip);
   Serial.print("\n .consimage: ");
   Serial.print(p->consimage);
+  Serial.print("\n .channelid: ");
+  Serial.print(p->channelid);
   Serial.print("\n .lastbyte: ");
   Serial.print(p->lastbyte);
 }
@@ -448,10 +457,6 @@ void logtsp()
   h = readadjustedhumidity();
   p = readadjustedpressure();
 
-  str_f1 += (String) workingset.tspfield;
-  str_f2 += (String)(workingset.tspfield + 1);
-  str_f3 += (String)(workingset.tspfield + 2);
-
   if ( debug == 1) return;
   if ( workingset.tspapikey == "" )
   {
@@ -459,40 +464,28 @@ void logtsp()
     return;
   }
 
-  if (client.connect("api.thingspeak.com", 80)) { //   "184.106.153.149" or api.thingspeak.com
-    String postStr = workingset.tspapikey;
-    postStr += "&" + str_f1 + "=";
-    postStr += String(t);
-    postStr += "&" + str_f2 + "=";
-    postStr += String(h);
-    postStr += "&" + str_f3 + "=";
-    postStr += String(p);
-    postStr += "\r\n\r\n";
+ // ThingSpeak.begin(client);
+  ThingSpeak.setField(workingset.tspfield, t);
+  ThingSpeak.setField(workingset.tspfield + 1, h);
+  ThingSpeak.setField(workingset.tspfield + 2, p);
 
-    client.print("POST /update HTTP/1.1\n");
-    client.print("Host: api.thingspeak.com\n");
-    client.print("Connection: close\n");
-    client.print("X-THINGSPEAKAPIKEY: ");
-    client.print(workingset.tspapikey);
-    client.print("\n");
-    client.print("Content-Type: application/x-www-form-urlencoded\n");
-    client.print("Content-Length: ");
-    client.print(postStr.length());
-    client.print("\n\n");
-    client.print(postStr);
+  int x = ThingSpeak.writeFields(workingset.channelid , workingset.tspapikey);
+  if (x == 200) {
+    Serial.print("\nChannel update successful.");
     Serial.print("\nData sent to thingspeak ");
     Serial.print(" field:");
-    Serial.print(str_f1);
+    Serial.print(workingset.tspfield);
     Serial.print(" t:");
     Serial.print(t);
     Serial.print(" h:");
     Serial.print(h);
     Serial.print(" p:");
     Serial.print(p);
-
-    last_tsp_milis = currentmilis;
   }
-  client.stop();
+  else {
+    Serial.println("\nProblem updating channel. HTTP error code " + String(x));
+  }
+  last_tsp_milis = currentmilis;
 }
 
 // Return a string with easy to read time
@@ -715,6 +708,15 @@ void handleset() {
       msg2 += myeprom.tspapikey;
     }
 
+    if ( server.argName(i) == "channelid" )
+    {
+      s2 = (String)server.arg(i);
+      // toInt returns a long in fact
+      myeprom.channelid = s2.toInt();
+      msg2 += "\nchannelid updated: ";
+      msg2 += myeprom.channelid;
+    }
+
     if ( server.argName(i) == "wifissid" )
     {
       knownssid[0] = (String)server.arg(i);
@@ -874,7 +876,11 @@ void handleSetup()
 \n  <td><input type=\"text\" name=\"adjust\" maxlength=\"5\" value=\"";
   message += workingset.tempadjust;
   message += "\"></td></tr> \
-\n  <tr><td>ThingSpeak Channel: </td>\
+\n  <tr><td>ThingSpeak ChannelID: </td>\
+\n  <td><input type=\"text\" name=\"channelid\" maxlength=\"50\" value=\"";
+  message += workingset.channelid;
+  message += "\"></td></tr> \
+\n  <tr><td>ThingSpeak Write API key: </td>\
 \n  <td><input type=\"text\" name=\"tspapikey\" maxlength=\"50\" value=\"";
   message += workingset.tspapikey;
   message += "\"></td></tr> \
@@ -1289,7 +1295,7 @@ void lcd_display_cons()
           lcd.setCursor(17, 1);
         }
       }
-      prevcons=2;
+      prevcons = 2;
       break;
   }
 }
@@ -1461,7 +1467,7 @@ void setup(void) {
 
   lcd.begin(20, 4, LCD_5x8DOTS);       // initialize the lcd for 20 chars 4 lines, turn on backlight
   lcd.backlight();
-  lcd.createChar(CELSIUS, celsiusChar);  
+  lcd.createChar(CELSIUS, celsiusChar);
 
 
 
@@ -1542,6 +1548,10 @@ void setup(void) {
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("\nHTTP server started");
+
+  ThingSpeak.begin(client);
+  Serial.println("\nThingspeak client enabled started");
+  
 
   Wire.begin();
   Wire.setClock(400000); //Increase to fast I2C speed!
